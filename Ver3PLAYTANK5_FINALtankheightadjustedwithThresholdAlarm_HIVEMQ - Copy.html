@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Smart Tank Monitor</title>
+  <!-- Google Charts for Gauge -->
+  <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+  <!-- MQTT.js library -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background-color: #eef7ff;
+      display: flex;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      max-width: 350px;
+      width: 100%;
+    }
+    .tank-container {
+      position: relative;
+      height: 320px;
+      border: 2px solid #333;
+      background: #ccc;
+      border-radius: 80% 80% 20% 20% / 30% 30% 5% 5%;
+      overflow: hidden;
+      margin: 0 auto;
+      box-shadow: inset 0 0 8px rgba(0,0,0,0.3);
+    }
+    .tank-legs {
+      display: flex;
+      justify-content: space-around;
+      margin-top: -10px;
+    }
+    .leg {
+      width: 20px;
+      height: 30px;
+      background: #333;
+    }
+    .water-level {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      background: linear-gradient(to top, #007acc, #00bfff);
+      transition: height 1s ease-in-out;
+    }
+    .label {
+      position: absolute;
+      width: 100%;
+      text-align: center;
+      font-weight: bold;
+      pointer-events: none;
+    }
+    .full         { top: 5%; color: green; }
+    .almostfull   { top: 25%; color: orange; }
+    .half         { top: 50%; color: gold; }
+    .almostempty  { top: 70%; color: red; }
+    .empty        { bottom: 5%; color: yellow; background: red; }
+    .motors {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 20px;
+      align-items: center;
+    }
+    .motor {
+      width: 48%;
+      text-align: center;
+    }
+    .motor-icon {
+      width: 60px;
+      height: 60px;
+      margin: 0 auto 5px;
+      background-color: #444;
+      border-radius: 10%;
+      position: relative;
+    }
+    .motor-value {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 1.1em;
+      font-weight: bold;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .motor-on {
+      animation: spin 1s linear infinite;
+      background: #4CAF50;
+    }
+    .motor-off {
+      background: #f44336;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+    .motor-label {
+      font-weight: bold;
+      font-size: 0.95em;
+      margin-top: 5px;
+    }
+    .gauges {
+      display: flex;
+      justify-content: space-around;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+    .gauge {
+      width: 23%;
+    }
+    @media (max-width: 480px) {
+      .tank-container {
+        height: 250px;
+      }
+      .motor-icon {
+        width: 50px;
+        height: 50px;
+      }
+      .gauge {
+        width: 100%;
+        margin-bottom: 10px;
+      }
+    }
+    #alertModal {
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(0,0,0,0.4);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    #alertContent {
+      background: white;
+      padding: 25px 34px;
+      border-radius: 9px;
+      box-shadow: 0 2px 24px rgba(0,0,0,0.33);
+      text-align: center;
+      font-size: 1.2em;
+      color: #c00303;
+      font-weight: bold;
+    }
+    #alertModal.active { display: flex; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- TANK -->
+    <div class="tank-container">
+      <div class="water-level" id="waterLevel" style="height: 50%;"></div>
+      <div class="label full">FULL</div>
+      <div class="label almostfull">Almost Full</div>
+      <div class="label half">Half</div>
+      <div class="label almostempty">Almost Empty</div>
+      <div class="label empty">Empty</div>
+    </div>
+    <div class="tank-legs">
+      <div class="leg"></div>
+      <div class="leg"></div>
+      <div class="leg"></div>
+    </div>
+    <!-- MOTORS -->
+    <div class="motors">
+      <div class="motor">
+        <div class="motor-icon motor-off" id="motorInlet">
+          <div class="motor-value" id="motorInletValue">0</div>
+        </div>
+        <div class="motor-label">(Big)</div>
+      </div>
+      <div class="motor">
+        <div class="motor-icon motor-off" id="motorOutlet">
+          <div class="motor-value" id="motorOutletValue">0</div>
+        </div>
+        <div class="motor-label">(Small)</div>
+      </div>
+    </div>
+    <!-- GAUGE CHARTS -->
+    <div class="gauges">
+      <div class="gauge" id="gaugeInlet"></div>
+      <div class="gauge" id="gaugeOutlet"></div>
+    </div>
+  </div>
+  <!-- AUDIO ALERT -->
+  <audio id="alertSound" src="https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg"></audio>
+  <!-- ALERT POPUP -->
+  <div id="alertModal">
+    <div id="alertContent"></div>
+  </div>
+  <!-- GOOGLE GAUGE JS -->
+  <script type="text/javascript">
+    google.charts.load('current', {'packages':['gauge']});
+    let gaugeIn, gaugeOut, gaugeInData, gaugeOutData;
+    function drawGauges() {
+      gaugeInData = google.visualization.arrayToDataTable([
+        ['Label', 'Value'],
+        ['BIG', 0]
+      ]);
+      gaugeOutData = google.visualization.arrayToDataTable([
+        ['Label', 'Value'],
+        ['SMALL', 0]
+      ]);
+      const options = {
+        width: 100, height: 100,
+        redFrom: 0, redTo: 2,
+        yellowFrom:2, yellowTo: 8,
+        greenFrom:8, greenTo: 18,
+        minorTicks: 2, max: 18
+      };
+      gaugeIn = new google.visualization.Gauge(document.getElementById('gaugeInlet'));
+      gaugeOut = new google.visualization.Gauge(document.getElementById('gaugeOutlet'));
+      gaugeIn.draw(gaugeInData, options);
+      gaugeOut.draw(gaugeOutData, options);
+    }
+    google.charts.setOnLoadCallback(drawGauges);
+  </script>
+  <!-- MQTT + ALERTS LOGIC -->
+  <script>
+    // MQTT Topics/Broker
+    const mqttBroker = 'wss://broker.hivemq.com:8884/mqtt';
+    const topicUltrasonic = 'sensor/ultrasonic';
+    const topicFlow1 = 'sensor/waterflow1';
+    const topicFlow2 = 'sensor/waterflow2';
+    const client = mqtt.connect(mqttBroker);
+
+    // Calibration for water level
+    const EMPTY_LINE = 2;    // cm (sensor sees surface, tank is "full")
+    const FULL_LINE  = 120;  // cm (sensor sees bottom, tank is "empty")
+
+    // State
+    let latestUltrasonic = 60; // initialized at mid-tank
+    let latestFlow1 = 0;
+    let latestFlow2 = 0;
+    let motorIn = false;
+    let motorOut = false;
+
+    // Alert state
+    let lowLevelAlerted = false;
+    let fullLevelAlerted = false;
+    let bigMotorOnSince = null, bigMotorLowAlerted = false;
+    let smallMotorOnSince = null, smallMotorLowAlerted = false;
+
+    // Tank percent conversion
+    function getTankLevelPercent(ultraReading) {
+      if (ultraReading <= EMPTY_LINE) return 100;
+      if (ultraReading >= FULL_LINE) return 0;
+      return ((FULL_LINE - ultraReading) / (FULL_LINE - EMPTY_LINE)) * 100;
+    }
+
+    function showAlert(msg) {
+      let snd = document.getElementById("alertSound");
+      snd.pause(); snd.currentTime = 0; snd.play();
+      let modal = document.getElementById('alertModal');
+      let content = document.getElementById('alertContent');
+      content.textContent = msg;
+      modal.classList.add('active');
+      setTimeout(() => { modal.classList.remove('active'); }, 3500);
+    }
+
+    function checkAlerts() {
+      let levelPercent = getTankLevelPercent(latestUltrasonic);
+
+      // 1. Water level < 25%
+      if (levelPercent < 25) {
+        if (!lowLevelAlerted) {
+          showAlert("Alert: Water Level is LOW!");
+          lowLevelAlerted = true;
+        }
+      } else {
+        lowLevelAlerted = false;
+      }
+
+      // 4. Water Level ≥ 95%
+      if (levelPercent >= 95) {
+        if (!fullLevelAlerted) {
+          showAlert("Alert: Tank is FULL!");
+          fullLevelAlerted = true;
+        }
+      } else {
+        fullLevelAlerted = false;
+      }
+
+      // 2. Big Motor ON, Flow1 <2 for 2+ min
+      if (motorIn) {
+        if (bigMotorOnSince === null) bigMotorOnSince = Date.now();
+        if ((Date.now() - bigMotorOnSince) > 2*60*1000) {
+          if (latestFlow1 < 2 && !bigMotorLowAlerted) {
+            showAlert("Alert: BIG Motor ON but Flow1 is LOW!");
+            bigMotorLowAlerted = true;
+          }
+        }
+        if (latestFlow1 >= 2) bigMotorLowAlerted = false;
+      } else {
+        bigMotorOnSince = null; bigMotorLowAlerted = false;
+      }
+
+      // 3. Small Motor ON, Flow2 <2 for 2+ min
+      if (motorOut) {
+        if (smallMotorOnSince === null) smallMotorOnSince = Date.now();
+        if ((Date.now() - smallMotorOnSince) > 2*60*1000) {
+          if (latestFlow2 < 2 && !smallMotorLowAlerted) {
+            showAlert("Alert: SMALL Motor ON but Flow2 is LOW!");
+            smallMotorLowAlerted = true;
+          }
+        }
+        if (latestFlow2 >= 2) smallMotorLowAlerted = false;
+      } else {
+        smallMotorOnSince = null; smallMotorLowAlerted = false;
+      }
+    }
+
+    client.on('connect', function () {
+      client.subscribe([topicUltrasonic, topicFlow1, topicFlow2]);
+    });
+
+    client.on('message', function (topic, message) {
+      const value = parseFloat(message.toString());
+      if (topic === topicUltrasonic) {
+        latestUltrasonic = value;
+        let levelPercent = getTankLevelPercent(value);
+        document.getElementById("waterLevel").style.height = levelPercent + "%";
+      }
+      if (topic === topicFlow1 && typeof gaugeInData !== 'undefined') {
+        latestFlow1 = value;
+        gaugeInData.setValue(0, 1, value);
+        if (typeof gaugeIn !== 'undefined') gaugeIn.draw(gaugeInData, null);
+        motorIn = value > 10;
+        document.getElementById("motorInlet").className = motorIn ? 'motor-icon motor-on' : 'motor-icon motor-off';
+        document.getElementById("motorInletValue").textContent = value.toFixed(1);
+      }
+      if (topic === topicFlow2 && typeof gaugeOutData !== 'undefined') {
+        latestFlow2 = value;
+        gaugeOutData.setValue(0, 1, value);
+        if (typeof gaugeOut !== 'undefined') gaugeOut.draw(gaugeOutData, null);
+        motorOut = value > 5;
+        document.getElementById("motorOutlet").className = motorOut ? 'motor-icon motor-on' : 'motor-icon motor-off';
+        document.getElementById("motorOutletValue").textContent = value.toFixed(1);
+      }
+      checkAlerts();
+    });
+
+    // Close modal on click/tap
+    document.addEventListener('DOMContentLoaded', function () {
+      document.getElementById('alertModal').addEventListener('click', function () {
+        this.classList.remove('active');
+      });
+    });
+  </script>
+</body>
+</html>
